@@ -11,8 +11,8 @@
 # Major version bumps are never tagged automatically. ccv only computes the
 # version (write-tag: false); this workflow pushes the tag itself after the
 # major-bump guard passes. A major bump fails the run until a maintainer
-# approves it with a manual dispatch using `allow_major`
-# (see CONTRIBUTING.md#major-releases).
+# approves it with a manual dispatch using `allow_major` and the reviewed
+# commit as `expected_sha` (see CONTRIBUTING.md#major-releases).
 
 name: Tag
 
@@ -24,9 +24,13 @@ on:
         type: boolean
         default: false
       allow_major:
-        description: Allow tagging and releasing a major version bump
+        description: Allow tagging and releasing a major version bump (requires expected_sha)
         type: boolean
         default: false
+      expected_sha:
+        description: Full commit SHA approved for the major release (from the blocked or dry run summary)
+        type: string
+        default: ""
 
   # Bi-monthly: 1st and 16th at 15:00 UTC.
   # Offset from bazel-lib (2nd/17th) and rules_lint (3rd/18th) to stagger BCR load.
@@ -84,41 +88,53 @@ jobs:
             exit 1
           fi
 
+      # Show which commits ccv treats as breaking, so a maintainer can tell an
+      # intended major from accidental `BREAKING CHANGE: ` text in a commit body.
+      # Matching body lines are printed under each subject. The grep is per
+      # line, so it may list a few more commits than ccv counts. Control
+      # characters and backticks are stripped so commit text cannot break out
+      # of the code block in the summary.
+      - name: List breaking commits
+        id: list
+        if: steps.ccv.outputs.new-tag-version-type == 'major'
+        continue-on-error: true # Informational only
+        run: |
+          last_tag="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*')"
+          breaking='^(fix|feat)(\(.+\))?!: |BREAKING CHANGE: '
+          commits="$(
+            git log --format='%H' -E --grep='^(fix|feat)(\(.+\))?!: ' --grep='BREAKING CHANGE: ' "${last_tag}..HEAD" |
+              while read -r sha; do
+                git log -1 --format='%h %s' "${sha}"
+                git log -1 --format='%b' "${sha}" | { grep -E -- "${breaking}" || true; } | sed 's/^/    /'
+              done |
+              LC_ALL=C tr -d '\000-\010\013-\037\177' | tr '`' "'"
+          )"
+          {
+            echo "### Commits since \`${last_tag}\` that ccv treats as breaking"
+            echo
+            echo '```text'
+            echo "${commits:-(none found)}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Report dry run
         if: steps.ccv.outputs.new-tag == 'true' && inputs.dry_run
         env:
           TAG: ${{ steps.ccv.outputs.new-tag-version }}
           TYPE: ${{ steps.ccv.outputs.new-tag-version-type }}
-          ALLOW_MAJOR: ${{ inputs.allow_major }}
         run: |
           {
             echo "Dry run: next version would be \`${TAG}\` (${TYPE}) at \`${GITHUB_SHA}\`. No tag pushed."
             if [[ "${TYPE}" == "major" ]]; then
               echo
-              if [[ "${ALLOW_MAJOR}" == "true" ]]; then
-                echo "The same run without \`dry_run\` would push this major tag and release it."
-              else
-                echo "A non-dry run would fail unless \`allow_major\` is set (see CONTRIBUTING.md#major-releases)."
-              fi
+              echo "A non-dry run needs approval. To tag exactly this commit as \`${TAG}\`, run:"
+              echo
+              echo '```bash'
+              echo "gh workflow run tag.yaml --ref main -f allow_major=true -f expected_sha=${GITHUB_SHA}"
+              echo '```'
+              echo
+              echo "The run fails without tagging if \`main\` has moved past this commit."
             fi
-          } >> "${GITHUB_STEP_SUMMARY}"
-
-      # Show which commits ccv treats as breaking, so a maintainer can tell an
-      # intended major from accidental `BREAKING CHANGE: ` text in a commit body.
-      # The grep is per line, so it may list a few more commits than ccv counts.
-      - name: List breaking commits
-        if: steps.ccv.outputs.new-tag-version-type == 'major'
-        continue-on-error: true # Informational only
-        run: |
-          last_tag="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*')"
-          {
-            echo "### Commits since \`${last_tag}\` that ccv treats as breaking"
-            echo
-            echo '```text'
-            git log --format='%h %s' -E \
-              --grep='^(fix|feat)(\(.+\))?!: ' --grep='BREAKING CHANGE: ' \
-              "${last_tag}..HEAD"
-            echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Block major version bump
@@ -129,32 +145,56 @@ jobs:
           !inputs.allow_major
         env:
           TAG: ${{ steps.ccv.outputs.new-tag-version }}
+          LIST_OK: ${{ steps.list.outcome == 'success' }}
         run: |
           echo "::error title=Major version bump::Commits since the last tag require a major bump to ${TAG}. Major releases need approval via allow_major."
           {
             echo "## Major version bump blocked"
             echo
-            echo "Commits since the last tag require a major bump to \`${TAG}\`. No tag was pushed."
-            echo "Every later run will fail the same way until the major release is approved."
+            echo "Commits since the last tag require a major bump to \`${TAG}\` at \`${GITHUB_SHA}\`. No tag was pushed."
+            echo "Scheduled runs, and dispatches without \`allow_major\`, fail the same way until a major tag is pushed."
             echo
-            echo "Check the breaking commits listed above. To approve, preview and then run:"
+            if [[ "${LIST_OK}" == "true" ]]; then
+              echo "Check the breaking commits listed above."
+            else
+              echo "Listing the breaking commits failed. Inspect \`git log\` since the last tag before approving."
+            fi
+            echo "To tag exactly this commit as \`${TAG}\` and release it, run:"
             echo
             echo '```bash'
-            echo "gh workflow run tag.yaml --ref main -f dry_run=true -f allow_major=true"
-            echo "gh workflow run tag.yaml --ref main -f allow_major=true"
+            echo "gh workflow run tag.yaml --ref main -f allow_major=true -f expected_sha=${GITHUB_SHA}"
             echo '```'
             echo
-            echo "See CONTRIBUTING.md#major-releases."
+            echo "The run fails without tagging if \`main\` has moved past this commit. See CONTRIBUTING.md#major-releases."
           } >> "${GITHUB_STEP_SUMMARY}"
           exit 1
 
-      - name: Push tag
-        id: push
-        # The major check is repeated so a skipped guard can never push an
-        # unapproved major tag. `inputs.allow_major` is null on scheduled runs.
+      # Bind the approval to the commit the maintainer reviewed. A tag is
+      # immutable, so never tag a newer main than the one that was approved.
+      - name: Verify approved commit
         if: >-
           steps.ccv.outputs.new-tag == 'true' &&
-          (steps.ccv.outputs.new-tag-version-type != 'major' || inputs.allow_major) &&
+          steps.ccv.outputs.new-tag-version-type == 'major' &&
+          !inputs.dry_run &&
+          inputs.allow_major
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          if [[ "${EXPECTED_SHA}" != "${GITHUB_SHA}" ]]; then
+            echo "::error title=Approved commit mismatch::allow_major requires expected_sha to equal the commit being tagged (expected '${EXPECTED_SHA}', got '${GITHUB_SHA}'). If main moved, review the new commits and approve again."
+            exit 1
+          fi
+
+      - name: Push tag
+        id: push
+        # The major checks are repeated so a skipped guard can never push an
+        # unapproved major tag. On scheduled runs `inputs.*` are empty (falsy).
+        # Do not use `github.event.inputs.*` here: those are strings, and
+        # "false" is truthy.
+        if: >-
+          steps.ccv.outputs.new-tag == 'true' &&
+          (steps.ccv.outputs.new-tag-version-type != 'major' ||
+            (inputs.allow_major && inputs.expected_sha == github.sha)) &&
           !inputs.dry_run
         env:
           TAG: ${{ steps.ccv.outputs.new-tag-version }}
