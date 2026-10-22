@@ -1,0 +1,38 @@
+# STUB of rules_odin release.yaml for testing tag.yaml. Logs how it was triggered.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_call:
+    inputs:
+      tag_name:
+        required: true
+        type: string
+    secrets:
+      BCR_PUBLISH_TOKEN:
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  stub:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.tag_name || github.ref }}
+          persist-credentials: false
+      - env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ inputs.tag_name || github.ref }}
+        run: |
+          echo "STUB-RELEASE event=${EVENT} tag=${TAG}"
+          git log -1 --oneline
+          echo "STUB-RELEASE event=${EVENT} tag=${TAG}" >> "${GITHUB_STEP_SUMMARY}"
