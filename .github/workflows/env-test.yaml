@@ -1,0 +1,38 @@
+# Test harness: dispatch on any ref (or push a env-test-* tag) to check
+# environment secret resolution and deployment branch/tag policies.
+name: Env test
+
+on:
+  workflow_dispatch:
+    inputs:
+      pat_smoke:
+        type: boolean
+        default: false
+  push:
+    tags:
+      - "vtest-*"
+
+permissions: {}
+
+jobs:
+  baseline:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fingerprint repo-level secret (no environment)
+        env:
+          T: ${{ secrets.BCR_PUBLISH_TOKEN }}
+        run: |
+          fp() { if [ -z "$1" ]; then echo "<empty>"; else printf '%s' "$1" | sha256sum | cut -c1-12; fi; }
+          line="FP-BASELINE ref=${GITHUB_REF} repo_BCR_PUBLISH_TOKEN=$(fp "$T") len=${#T}"
+          echo "$line"
+          echo "$line" >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    uses: ./.github/workflows/publish.yaml
+    with:
+      tag_name: env-test
+      pat_smoke: ${{ inputs.pat_smoke || false }}
+    permissions:
+      contents: read
+    secrets:
+      BCR_PUBLISH_TOKEN: ${{ secrets.BCR_PUBLISH_TOKEN }}

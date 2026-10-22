@@ -1,0 +1,59 @@
+# STUB of bazel-contrib/publish-to-bcr publish.yaml@v1.4.2 (same interface for
+# environment + publish_token). Prints token fingerprints, optionally smoke-tests
+# the PAT against the BCR fork exactly like upstream does (x-access-token push).
+name: Fake upstream publish
+
+on:
+  workflow_call:
+    inputs:
+      tag_name:
+        required: true
+        type: string
+      environment:
+        required: false
+        type: string
+        default: ""
+      pat_smoke:
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      publish_token:
+        required: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+    steps:
+      - name: Fingerprint token
+        env:
+          T: ${{ secrets.publish_token }}
+          T_RAW: ${{ secrets.BCR_PUBLISH_TOKEN }}
+          ENV_NAME: ${{ inputs.environment }}
+          TAG: ${{ inputs.tag_name }}
+        run: |
+          fp() { if [ -z "$1" ]; then echo "<empty>"; else printf '%s' "$1" | sha256sum | cut -c1-12; fi; }
+          fg=no; case "$T" in github_pat_*) fg=yes ;; esac
+          line="FP-UPSTREAM env=${ENV_NAME:-<none>} ref=${GITHUB_REF} tag=${TAG} publish_token=$(fp "$T") len=${#T} fine_grained=${fg} raw_BCR_PUBLISH_TOKEN=$(fp "$T_RAW")"
+          echo "$line"
+          echo "$line" >> "$GITHUB_STEP_SUMMARY"
+      - name: PAT smoke test against the fork
+        if: inputs.pat_smoke
+        env:
+          T: ${{ secrets.publish_token }}
+        run: |
+          set -euo pipefail
+          fork=clappingmonkey/bazel-central-registry
+          branch=rules-odin-pat-smoke-test
+          git init -q smoke
+          cd smoke
+          git remote add authed-fork "https://x-access-token:${T}@github.com/${fork}.git"
+          git fetch -q --depth=1 authed-fork main
+          git push authed-fork "FETCH_HEAD:refs/heads/${branch}"
+          echo "SMOKE after push: $(git ls-remote authed-fork "refs/heads/${branch}" | wc -l) ref(s)"
+          git push authed-fork --delete "${branch}"
+          echo "SMOKE after delete: $(git ls-remote authed-fork "refs/heads/${branch}" | wc -l) ref(s)"
+          echo "SMOKE OK" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,29 @@
+# Mirror of rules_odin publish.yaml with the H2 change (environment: bcr-publish),
+# calling a local stub instead of bazel-contrib/publish-to-bcr.
+name: Publish to BCR
+
+on:
+  workflow_call:
+    inputs:
+      tag_name:
+        required: true
+        type: string
+      pat_smoke:
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      BCR_PUBLISH_TOKEN:
+        required: true
+
+jobs:
+  publish:
+    uses: ./.github/workflows/fake-upstream.yaml
+    with:
+      tag_name: ${{ inputs.tag_name }}
+      environment: bcr-publish
+      pat_smoke: ${{ inputs.pat_smoke }}
+    permissions:
+      contents: read
+    secrets:
+      publish_token: ${{ secrets.BCR_PUBLISH_TOKEN }}
