@@ -1,4 +1,6 @@
-# STUB of rules_odin release.yaml for testing tag.yaml. Logs how it was triggered.
+# STUB of rules_odin release.yaml (H2 version): real verify job and finalize
+# link step; test/release are stubs; publish goes through publish.yaml →
+# fake-upstream.yaml (environment bcr-publish).
 name: Release
 
 on:
@@ -20,19 +22,82 @@ permissions:
   attestations: write
 
 jobs:
-  stub:
+  verify:
+    name: Verify tag
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ inputs.tag_name || github.ref }}
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Check tag name and that the tagged commit is on main
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag_name || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tags must look like vX.Y.Z (got '${TAG}')."
+            exit 1
+          fi
+          commit=$(git rev-parse --verify "refs/tags/${TAG}^{commit}")
+          if ! git merge-base --is-ancestor "${commit}" refs/remotes/origin/main; then
+            echo "::error::Tag ${TAG} points at ${commit}, which is not on main. Only commits merged to main are released."
+            exit 1
+          fi
+          echo "Tag ${TAG} -> ${commit} is on main."
+
+  stub:
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
       - env:
           EVENT: ${{ github.event_name }}
-          TAG: ${{ inputs.tag_name || github.ref }}
+          TAG: ${{ inputs.tag_name || github.ref_name }}
         run: |
           echo "STUB-RELEASE event=${EVENT} tag=${TAG}"
-          git log -1 --oneline
           echo "STUB-RELEASE event=${EVENT} tag=${TAG}" >> "${GITHUB_STEP_SUMMARY}"
+
+  publish:
+    name: Publish to BCR
+    needs: stub
+    uses: ./.github/workflows/publish.yaml
+    permissions:
+      contents: read
+    with:
+      tag_name: ${{ inputs.tag_name || github.ref_name }}
+    secrets:
+      BCR_PUBLISH_TOKEN: ${{ secrets.BCR_PUBLISH_TOKEN }}
+
+  finalize:
+    name: Publish release
+    needs: [stub, publish]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Link to open the BCR pull request
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag_name || github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          title="rules_odin@${TAG#v}"
+          body=$(printf 'Release: https://github.com/%s/releases/tag/%s\n\n_Automated by [Publish to BCR](https://github.com/bazel-contrib/publish-to-bcr)_\n' "${REPO}" "${TAG}")
+          url="https://github.com/bazelbuild/bazel-central-registry/compare/main...clappingmonkey:bazel-central-registry:rules_odin-${TAG}?quick_pull=1&title=$(jq -rn --arg v "${title}" '$v|@uri')&body=$(jq -rn --arg v "${body}" '$v|@uri')"
+          {
+            echo "### Open the BCR pull request"
+            echo
+            echo "The BCR entry for \`${title}\` was pushed to the fork. Open the pull request (signed in as a module maintainer):"
+            echo
+            echo "${url}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          echo "Open the BCR pull request: ${url}"
